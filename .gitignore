@@ -1,0 +1,73 @@
+# =============================
+# Python project .gitignore
+# Keeps repo slim and clean
+# =============================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.conda/
+venv*/
+.venv*/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Unit test / coverage reports
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Type checker caches
+.mypy_cache/
+.pytype/
+dmypy.json
+.dmypy.json
+
+# Linters / analyzers
+.ruff_cache/
+.pyre/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / Editor
+.DS_Store
+.idea/
+.vscode/
+.claude/
+
+# Logs / runtime
+logs/
+*.log
+
+# Results and experiment artifacts (top-level and nested)
+results/
+experiments/
+**/results/**
+**/experiments/**
+
+# Common ML experiment outputs
+checkpoints/
+runs/
+wandb/
+mlruns/
+
+# Caches
+.cache/
+.cache-*/
+
+# Local environment files
+.env
+.env.*
