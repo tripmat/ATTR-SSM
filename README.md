@@ -1,6 +1,7 @@
 # ATTR-SSM: Academic Replication Study - FIXED VERSION
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tripmat/ATTR-SSM/blob/main/notebooks/colab_quickstart.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)]
+(https://colab.research.google.com/github/tripmat/ATTR-SSM/blob/main/notebooks/colab_quickstart.ipynb)
 
 Tip: use `--device auto` to prefer GPU when available.
 
