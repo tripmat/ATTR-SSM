@@ -164,6 +164,8 @@ def main():
     parser.add_argument('--plot-only', action='store_true', help='Generate plots only')
     parser.add_argument('--debug', action='store_true', help='Enable enhanced debugging mode')
     parser.add_argument('--extreme-verbosity', action='store_true', help='Enable EXTREME logging (training + attention)')
+    parser.add_argument('--device', default='cpu', choices=['cpu', 'cuda', 'mps', 'auto'],
+                        help='Select compute device (default: cpu). Use auto to prefer CUDA/MPS when available.')
     args = parser.parse_args()
     
     print("🎓 Academic Replication: Transformers vs Mamba")
@@ -175,7 +177,13 @@ def main():
     print("=" * 60)
     
     # Initialize experiment
+    from utils.device import resolve_device, device_summary
+    selected_device = resolve_device(args.device)
+    if args.device != 'cpu':
+        print(f"🧩 Device preference: {args.device} -> using {device_summary(selected_device)}")
     config, manager = create_academic_experiment()
+    # Apply device override without changing defaults for CPU users
+    config.device = selected_device
     task = CopyingTask(config.vocab_size)
     
     # Set evaluation lengths (no more quick mode)

@@ -1,5 +1,9 @@
 # ATTR-SSM: Academic Replication Study - FIXED VERSION
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tripmat/ATTR-SSM/blob/main/notebooks/colab_quickstart.ipynb)
+
+Tip: use `--device auto` to prefer GPU when available.
+
 🎯 **Fixed Replication** of "Repeat After Me: Transformers are Better than State Space Models at Copying" (Jelassi et al., 2024)
 
 ## 🔥 Critical Bug Fixes Applied
@@ -21,6 +25,9 @@ python main.py --quick --max-steps 200
 
 # Training only
 python main.py --train-only --max-steps 500
+
+# Prefer GPU automatically if available
+python main.py --device auto --train-only
 ```
 
 ## 🎯 Key Features

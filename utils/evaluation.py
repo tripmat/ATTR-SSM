@@ -58,7 +58,8 @@ def evaluate_model_simple(model, task, test_lengths, n_samples=20):
                     if target_start + len(target_list) <= logits.size(1):
                         # Match training: shift by -1 for next token prediction
                         pred_logits = logits[0, target_start-1:target_start-1+len(target_list)]
-                        predictions = pred_logits.argmax(dim=-1).numpy()
+                        # Ensure CPU numpy conversion works on GPU devices
+                        predictions = pred_logits.argmax(dim=-1).detach().cpu().numpy()
                         target_np = np.array(target_list)
                         
                         if np.array_equal(predictions, target_np):
