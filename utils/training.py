@@ -184,6 +184,15 @@ class ComprehensiveTrainer:
         self.loss_history_window = []  # Track recent losses for plateau detection
         self.accuracy_history_window = []  # Track recent token accuracies
         
+        # Mastery-based curriculum advancement
+        self.mastery_based_curriculum = config.get("mastery_based_curriculum", False)
+        self.mastery_threshold = config.get("mastery_threshold", 0.95)  # 95% sequence accuracy to consider mastery
+        self.mastery_consistency_required = config.get("mastery_consistency_required", 3)  # Consecutive validations above threshold
+        self.mastery_fallback_steps = config.get("mastery_fallback_steps", 5000)  # Steps after which to advance anyway
+        self.current_curriculum_length_idx = 0  # Track current position in curriculum
+        self.mastery_history = {}  # Track mastery progress per length: {length: [acc1, acc2, ...]}
+        self.steps_at_current_length = 0  # Steps spent at current curriculum length
+        
         # Validation setup
         self.val_interval = config.get("validation_interval", 200)
         self.val_lengths = config.get("validation_lengths", [50, 100, 150, 200, 250, 300, 350, 400, 450, 500])
@@ -481,7 +490,7 @@ class ComprehensiveTrainer:
         self.model.train()
         return val_results
     
-    def check_early_stopping(self, val_results: Dict[str, float], step: int) -> Dict[str, bool]:
+    def check_early_stopping(self, val_results: Dict[str, float], step: int, training_lengths: List[int] = None) -> Dict[str, bool]:
         """
         Intelligent early stopping based on actual training progress.
         
@@ -497,8 +506,25 @@ class ComprehensiveTrainer:
             'reason': None,
             'loss_plateau': False,
             'accuracy_stuck': False,
-            'accuracy_plateau': False
+            'accuracy_plateau': False,
+            'curriculum_complete': False
         }
+        
+        # Check if mastery-based curriculum is complete
+        if (self.mastery_based_curriculum and training_lengths and 
+            self.current_curriculum_length_idx >= len(training_lengths) - 1):
+            # We're at the final curriculum length - check if it's been mastered
+            final_length = training_lengths[-1]
+            final_acc_key = f"val_acc_{final_length}"
+            final_accuracy = val_results.get(final_acc_key, 0.0)
+            
+            if final_length in self.mastery_history and len(self.mastery_history[final_length]) >= self.mastery_consistency_required:
+                recent_final_accuracies = self.mastery_history[final_length][-self.mastery_consistency_required:]
+                if all(acc >= self.mastery_threshold for acc in recent_final_accuracies):
+                    stopping_info['should_stop'] = True
+                    stopping_info['curriculum_complete'] = True
+                    stopping_info['reason'] = f"curriculum_fully_mastered_final_length_{final_length}_at_{final_accuracy:.1%}"
+                    return stopping_info
         
         # Update loss tracking
         self.loss_history_window.append(val_loss)
@@ -586,6 +612,89 @@ class ComprehensiveTrainer:
             self.logger.info(f"  Best token accuracy: {self.best_val_token_accuracy:.1%}")
         
         return stopping_info
+    
+    def check_mastery_advancement(self, val_results: Dict[str, float], step: int, training_lengths: List[int]) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Check if current curriculum length has been mastered and should advance to next.
+        
+        Returns:
+            should_advance: bool - Whether to advance to next curriculum length
+            advancement_info: Dict with details about the advancement decision
+        """
+        if not self.mastery_based_curriculum or self.current_curriculum_length_idx >= len(training_lengths) - 1:
+            return False, {'reason': 'mastery_curriculum_disabled_or_final_length'}
+        
+        current_length = training_lengths[self.current_curriculum_length_idx]
+        seq_acc_key = f"val_acc_{current_length}"
+        current_seq_accuracy = val_results.get(seq_acc_key, 0.0)
+        
+        # Initialize mastery tracking for this length if needed
+        if current_length not in self.mastery_history:
+            self.mastery_history[current_length] = []
+        
+        # Record current accuracy
+        self.mastery_history[current_length].append(current_seq_accuracy)
+        
+        # Keep only recent history (last 10 validations)
+        if len(self.mastery_history[current_length]) > 10:
+            self.mastery_history[current_length].pop(0)
+        
+        advancement_info = {
+            'current_length': current_length,
+            'current_accuracy': current_seq_accuracy,
+            'mastery_threshold': self.mastery_threshold,
+            'steps_at_length': self.steps_at_current_length,
+            'should_advance': False,
+            'reason': None
+        }
+        
+        # Check for mastery: need consecutive validations above threshold
+        recent_accuracies = self.mastery_history[current_length]
+        if len(recent_accuracies) >= self.mastery_consistency_required:
+            recent_above_threshold = recent_accuracies[-self.mastery_consistency_required:]
+            if all(acc >= self.mastery_threshold for acc in recent_above_threshold):
+                advancement_info['should_advance'] = True
+                advancement_info['reason'] = f"mastery_achieved_{self.mastery_consistency_required}_consecutive_validations"
+                self.logger.info(f"🎯 MASTERY ACHIEVED at length {current_length}: {recent_above_threshold[-1]:.1%} >= {self.mastery_threshold:.1%}")
+                self.logger.info(f"   Consecutive validations above threshold: {recent_above_threshold}")
+                return True, advancement_info
+        
+        # Fallback: advance anyway if stuck too long at current length
+        if self.steps_at_current_length >= self.mastery_fallback_steps:
+            advancement_info['should_advance'] = True 
+            advancement_info['reason'] = f"fallback_timeout_{self.mastery_fallback_steps}_steps"
+            self.logger.info(f"⏰ FALLBACK ADVANCEMENT at length {current_length}: {self.steps_at_current_length} steps >= {self.mastery_fallback_steps}")
+            self.logger.info(f"   Current accuracy: {current_seq_accuracy:.1%}, Target: {self.mastery_threshold:.1%}")
+            return True, advancement_info
+        
+        # Log progress periodically
+        if step % (self.val_interval * 5) == 0:  # Every 5 validations
+            avg_recent = sum(recent_accuracies[-3:]) / min(3, len(recent_accuracies)) if recent_accuracies else 0.0
+            self.logger.info(f"📚 Curriculum Progress (Length {current_length}):")
+            self.logger.info(f"   Current accuracy: {current_seq_accuracy:.1%}")
+            self.logger.info(f"   Recent average: {avg_recent:.1%}")
+            self.logger.info(f"   Target for advancement: {self.mastery_threshold:.1%}")
+            self.logger.info(f"   Steps at this length: {self.steps_at_current_length}")
+        
+        return False, advancement_info
+    
+    def advance_curriculum(self, training_lengths: List[int], advancement_info: Dict[str, Any]) -> None:
+        """Advance to the next curriculum length and reset tracking."""
+        if self.current_curriculum_length_idx < len(training_lengths) - 1:
+            old_length = training_lengths[self.current_curriculum_length_idx] 
+            self.current_curriculum_length_idx += 1
+            new_length = training_lengths[self.current_curriculum_length_idx]
+            self.steps_at_current_length = 0  # Reset counter for new length
+            
+            self.logger.info(f"🚀 CURRICULUM ADVANCEMENT: {old_length} → {new_length}")
+            self.logger.info(f"   Reason: {advancement_info['reason']}")
+            self.logger.info(f"   Progress: {self.current_curriculum_length_idx + 1}/{len(training_lengths)} lengths")
+            
+            # Reset some early stopping counters to give the model a fresh start at the new length
+            self.evals_at_low_accuracy = 0
+            self.evals_without_accuracy_improvement = 0
+        else:
+            self.logger.info(f"🏁 Curriculum complete! Already at final length {training_lengths[-1]}")
     
     def debug_sequence_processing(self, task, input_seq, target_seq, step):
         """Debug and log sequence processing details"""
@@ -822,6 +931,17 @@ def train_model_comprehensive(model: nn.Module, model_name: str, task, config: D
         trainer.logger.info(f"  Sequence lengths: {config['training_lengths']}")
     else:
         trainer.logger.info(f"  Sequence lengths: {min_length}-{max_length}")
+    
+    # Mastery-based curriculum configuration
+    if trainer.mastery_based_curriculum:
+        trainer.logger.info(f"  🎯 MASTERY-BASED CURRICULUM ENABLED")
+        trainer.logger.info(f"    Mastery threshold: {trainer.mastery_threshold:.1%}")
+        trainer.logger.info(f"    Consistency required: {trainer.mastery_consistency_required} consecutive validations")
+        trainer.logger.info(f"    Fallback timeout: {trainer.mastery_fallback_steps} steps per length")
+        trainer.logger.info(f"    Starting at length: {training_lengths[trainer.current_curriculum_length_idx] if 'training_lengths' in locals() else 'TBD'}")
+    else:
+        trainer.logger.info(f"  📚 Using time-based curriculum (original)")
+        
     trainer.logger.info(f"  Loss plateau patience: {trainer.loss_plateau_patience} steps")
     trainer.logger.info(f"  Accuracy stuck patience: {trainer.accuracy_stuck_patience} steps")
     trainer.logger.info(f"  Stopping when loss plateaus AND token accuracy stays low")
@@ -861,9 +981,16 @@ def train_model_comprehensive(model: nn.Module, model_name: str, task, config: D
                     if augment:
                         training_lengths = sorted(training_lengths + augment)
                         trainer.logger.info(f"Augmented curriculum to ensure overlap with validation: added {augment}")
-            steps_per_length = max_steps // len(training_lengths)  # Equal time per length
-            current_length_idx = min(step // steps_per_length, len(training_lengths) - 1)
-            seq_length = training_lengths[current_length_idx]
+            # Curriculum selection: mastery-based or time-based
+            if trainer.mastery_based_curriculum:
+                # Use mastery-based curriculum
+                seq_length = training_lengths[trainer.current_curriculum_length_idx]
+                trainer.steps_at_current_length += 1  # Track steps at current length
+            else:
+                # Use original time-based curriculum  
+                steps_per_length = max_steps // len(training_lengths)  # Equal time per length
+                current_length_idx = min(step // steps_per_length, len(training_lengths) - 1)
+                seq_length = training_lengths[current_length_idx]
             
             # Training step
             try:
@@ -1069,11 +1196,17 @@ def train_model_comprehensive(model: nn.Module, model_name: str, task, config: D
                         trainer.training_history['val_accuracies'][key] = []
                     trainer.training_history['val_accuracies'][key].append(val_results.get(key, 0.0))
                 
-                # Intelligent early stopping check
-                stopping_info = trainer.check_early_stopping(val_results, step)
+                # Mastery-based curriculum advancement check
+                if trainer.mastery_based_curriculum:
+                    should_advance, advancement_info = trainer.check_mastery_advancement(val_results, step, training_lengths)
+                    if should_advance:
+                        trainer.advance_curriculum(training_lengths, advancement_info)
+                
+                # Intelligent early stopping check (now includes curriculum completion check)
+                stopping_info = trainer.check_early_stopping(val_results, step, training_lengths)
                 
                 if stopping_info['should_stop']:
-                    trainer.logger.info(f"ðŸ›‘ Intelligent early stopping triggered at step {step}")
+                    trainer.logger.info(f"🛑 Intelligent early stopping triggered at step {step}")
                     trainer.logger.info(f"   Reason: {stopping_info['reason']}")
                     break
             

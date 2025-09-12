@@ -62,17 +62,30 @@ def train_models(config, task, debug=False, extreme_verbosity=False):
         "validation_samples": 5,  # 5 samples per length for efficiency during training
         
         # Intelligent early stopping parameters
-        "loss_plateau_patience": 1000,  # Stop if loss doesn't improve for 1000 steps
-        "accuracy_stuck_patience": 2000,  # Stop if token accuracy stays low for 2000 steps
-        "loss_plateau_threshold": 1e-4,  # Minimum loss improvement considered meaningful
-        "accuracy_improvement_threshold": 0.01,  # 1% accuracy improvement threshold
+        "loss_plateau_patience": config.loss_plateau_patience,
+        "accuracy_stuck_patience": config.accuracy_stuck_patience,
+        "loss_plateau_threshold": config.loss_plateau_threshold,
+        "accuracy_improvement_threshold": config.accuracy_improvement_threshold,
+        "token_acc_stuck_threshold": config.token_acc_stuck_threshold,
         "checkpoint_interval": 1000,  # Save every 1000 steps
+        
+        # Mastery-based curriculum parameters
+        "mastery_based_curriculum": config.mastery_based_curriculum,
+        "mastery_threshold": config.mastery_threshold,
+        "mastery_consistency_required": config.mastery_consistency_required,
+        "mastery_fallback_steps": config.mastery_fallback_steps,
         
         # Sequence length curriculum
         # Use an explicit sparse curriculum for faster mastery on CPU
         "training_lengths": [10, 20, 40, 80, 160],
         "min_sequence_length": config.min_sequence_length,
         "max_sequence_length": 500,  # still used if explicit list omitted
+
+        # Mastery-based curriculum (optional)
+        "mastery_based_curriculum": config.mastery_based_curriculum,
+        "mastery_threshold": config.mastery_threshold,
+        "mastery_consistency_required": config.mastery_consistency_required,
+        "mastery_fallback_steps": config.mastery_fallback_steps,
     }
     
     if extreme_verbosity:

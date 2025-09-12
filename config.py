@@ -60,6 +60,12 @@ class ExperimentalConfig:
     weight_decay: float = 0.01   # Exclude norm/bias in optimizer groups
     max_grad_norm: float = 5.0   # Looser clipping; combined with no-clip warmup
     warmup_steps: int = 1000
+
+    # === MASTERY-BASED CURRICULUM (optional) ===
+    mastery_based_curriculum: bool = False
+    mastery_threshold: float = 0.95  # 95% sequence accuracy required to advance
+    mastery_consistency_required: int = 3  # consecutive validations at/above threshold
+    mastery_fallback_steps: int = 5000  # advance after this many steps at a length even without mastery
     
     # === COPYING TASK SPECIFICATION ===
     min_sequence_length: int = 50   # Following paper
@@ -76,6 +82,19 @@ class ExperimentalConfig:
     max_training_steps: int = 50000
     evaluation_interval: int = 1000
     checkpoint_interval: int = 5000
+    
+    # === MASTERY-BASED CURRICULUM LEARNING ===
+    mastery_based_curriculum: bool = False  # Enable mastery-based advancement instead of time-based
+    mastery_threshold: float = 0.95  # Sequence accuracy threshold to consider a length mastered (95%)
+    mastery_consistency_required: int = 3  # Number of consecutive validations above threshold needed
+    mastery_fallback_steps: int = 5000  # Max steps to spend at one length before advancing anyway
+    
+    # === INTELLIGENT EARLY STOPPING ===
+    loss_plateau_patience: int = 1000  # Steps without loss improvement before considering plateau
+    accuracy_stuck_patience: int = 2000  # Steps at low accuracy before considering stuck
+    loss_plateau_threshold: float = 1e-4  # Minimum loss improvement to count as progress
+    accuracy_improvement_threshold: float = 0.01  # 1% minimum accuracy improvement to count as progress
+    token_acc_stuck_threshold: float = 0.05  # 5% token accuracy threshold for "stuck" classification
     
     def __post_init__(self):
         """Initialize derived configurations"""
