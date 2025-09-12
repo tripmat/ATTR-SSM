@@ -109,7 +109,8 @@ class ComprehensiveTrainer:
         
         # Optimizer with proper hyperparameters
         base_lr = config.get("learning_rate", 2e-4)
-        weight_decay = config.get("weight_decay", 0.1)
+        # Use a conservative default; caller can override via config
+        weight_decay = config.get("weight_decay", 0.01)
         
         # Exclude LayerNorm/Norm and bias parameters from weight decay
         decay_params = []
@@ -136,11 +137,17 @@ class ComprehensiveTrainer:
         )
         
         # Learning rate scheduler
-        self.warmup_steps = config.get("warmup_steps", 1000)
+        # Warmup measured in optimizer steps; ensure at least 500 for stability
+        try:
+            _ws = int(config.get("warmup_steps", 500))
+        except Exception:
+            _ws = 500
+        self.warmup_steps = max(500, _ws)
         self.max_steps = config.get("max_training_steps", 50000)
         # Gradient clipping controls
         self.max_grad_norm = float(config.get("max_grad_norm", 5.0))  # loosen to 5.0 by default
-        self.no_clip_steps = int(config.get("no_clip_steps", 100))    # disable clipping for early steps
+        # Default: no delay in clipping to prevent early instability
+        self.no_clip_steps = int(config.get("no_clip_steps", 0))
 
         # Extreme logging setup (file logger initialized lazily when used)
         self.extreme_logger: Optional[logging.Logger] = None
@@ -841,6 +848,19 @@ def train_model_comprehensive(model: nn.Module, model_name: str, task, config: D
             # Discrete curriculum learning: train extensively on each length before advancing
             # Allow explicit override via config['training_lengths']
             training_lengths = config.get("training_lengths", list(range(min_length, max_length + 1, 50)))
+            # Ensure there is some overlap with validation lengths to surface early progress
+            try:
+                val_lens = list(trainer.val_lengths)
+            except Exception:
+                val_lens = []
+            if isinstance(training_lengths, list):
+                overlap = set(training_lengths).intersection(val_lens)
+                if not overlap:
+                    # Add a few short lengths commonly used in copying tasks
+                    augment = [l for l in [10, 20, 40, 50, 80, 100, 150, 160] if l not in training_lengths]
+                    if augment:
+                        training_lengths = sorted(training_lengths + augment)
+                        trainer.logger.info(f"Augmented curriculum to ensure overlap with validation: added {augment}")
             steps_per_length = max_steps // len(training_lengths)  # Equal time per length
             current_length_idx = min(step // steps_per_length, len(training_lengths) - 1)
             seq_length = training_lengths[current_length_idx]
