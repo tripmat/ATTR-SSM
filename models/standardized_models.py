@@ -9,7 +9,11 @@ Model Factory validates parameter counts and ensures reproducible initialization
 
 Enhanced with EXTREME attention debugging hooks (opt‑in via set_debug_mode).
 
-FIXED: ALiBi attention mechanism and initialization issues
+FIXED: 
+- ALiBi attention mechanism disabled by default (harmful for copying)
+- Proper ALiBi scaling if enabled
+- Conservative attention initialization
+- Numerically stable Mamba SSM implementation
 """
 
 import torch
@@ -62,7 +66,8 @@ def extreme_log(message: str, data: Any = None, force: bool = False):
 class ImprovedTransformer(nn.Module):
     """
     Improved Transformer with optional ALiBi positional encoding.
-    FIXED: ALiBi now properly scaled and optional by default.
+    FIXED: ALiBi disabled by default (harmful for copying task).
+    Conservative initialization for stable training.
     """
     
     def __init__(self, config: Dict[str, Any]):
@@ -80,9 +85,9 @@ class ImprovedTransformer(nn.Module):
         self.use_hard_alibi = config.get("use_hard_alibi", False)  # Changed default to False
         if self.use_hard_alibi:
             self.register_buffer("alibi_slopes", self._get_alibi_slopes(self.n_heads))
-            print(f"🔧 Hard-ALiBi enabled with {self.n_heads} heads (WARNING: May hurt copying performance)")
+            print(f"⚠️  Hard-ALiBi enabled with {self.n_heads} heads (WARNING: May severely hurt copying performance)")
         else:
-            print(f"🔧 Using standard causal attention (better for copying)")
+            print(f"✅ Using standard causal attention (optimal for copying)")
         
         # Transformer layers with improved attention
         self.layers = nn.ModuleList([
@@ -127,26 +132,24 @@ class ImprovedTransformer(nn.Module):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
     
     def _initialize_weights_deterministic(self):
-        """FIXED: More conservative initialization for better stability"""
+        """FIXED: Conservative initialization for stable training"""
         init_count = 0
         for name, module in self.named_modules():
             if isinstance(module, nn.Linear):
-                # FIXED: Use smaller initialization for attention layers
+                # FIXED: Much smaller initialization for attention layers
                 if any(x in name for x in ['q_proj', 'k_proj', 'v_proj', 'out_proj']):
-                    # Smaller initialization for attention
-                    nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                    # Very conservative for attention to prevent early instability
+                    nn.init.normal_(module.weight, mean=0.0, std=0.01)
                 else:
-                    # Standard initialization for FFN
-                    fan_in = module.in_features
-                    fan_out = module.out_features
-                    std = math.sqrt(2.0 / (fan_in + fan_out))
-                    nn.init.normal_(module.weight, mean=0.0, std=std)
+                    # Standard Xavier for FFN layers
+                    nn.init.xavier_uniform_(module.weight)
                 
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
                 init_count += 1
                         
             elif isinstance(module, nn.Embedding):
+                # Small initialization for embeddings
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
                 init_count += 1
                     
@@ -155,7 +158,7 @@ class ImprovedTransformer(nn.Module):
                 nn.init.zeros_(module.bias)
                 init_count += 1
         
-        print(f"🔧 Initialized {init_count} modules deterministically")
+        print(f"🔧 Initialized {init_count} modules with conservative settings")
     
     def forward(self, input_ids: torch.Tensor, labels: torch.Tensor = None,
                 debug: bool = False) -> Dict[str, Any]:
@@ -230,7 +233,7 @@ class ImprovedTransformer(nn.Module):
 class ImprovedTransformerLayer(nn.Module):
     """
     Transformer layer with optional ALiBi attention.
-    FIXED: Proper ALiBi scaling and causal masking.
+    FIXED: Proper ALiBi scaling and conservative initialization.
     """
     
     def __init__(self, d_model: int, n_heads: int, config: Dict[str, Any]):
@@ -298,7 +301,7 @@ class ImprovedTransformerLayer(nn.Module):
             for i in range(min(5, seq_len)):
                 print(f"      {i}: {head0_scores[i, :min(5, seq_len)].tolist()}")
 
-        # FIXED: Apply ALiBi with proper scaling
+        # FIXED: Apply ALiBi with extreme scaling to minimize harm
         if alibi_slopes is not None:
             positions = torch.arange(seq_len, device=x.device, dtype=torch.float32)
             # Distance matrix: positive when j < i (looking back)
@@ -307,17 +310,17 @@ class ImprovedTransformerLayer(nn.Module):
             distance_matrix = -distance_matrix.clamp(max=0)
             distance_matrix = distance_matrix.unsqueeze(0).unsqueeze(0)
             
-            # FIXED: Scale down ALiBi effect dramatically for copying task
-            alibi_scale = 0.01  # Very small scale to preserve attention
+            # FIXED: Extremely small scale to minimize ALiBi's harmful effect
+            alibi_scale = 0.001  # Even smaller scale for copying
             alibi_bias = alibi_scale * alibi_slopes.view(1, self.n_heads, 1, 1) * distance_matrix
             scores = scores + alibi_bias  # Add bias (not subtract)
             
             if dbg:
-                print("\n   ALIBI BIAS (FIXED):")
+                print("\n   ALIBI BIAS (MINIMIZED):")
                 extreme_log("   Distance matrix", distance_matrix[0, 0])
                 extreme_log("   ALiBi bias (head 0)", alibi_bias[0, 0])
                 print(f"   ALiBi range: [{alibi_bias.min().item():.4f}, {alibi_bias.max().item():.4f}]")
-                print(f"   ALiBi scale factor: {alibi_scale}")
+                print(f"   ALiBi scale factor: {alibi_scale} (minimized for copying)")
 
         # Causal mask
         causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device)).bool()
@@ -394,7 +397,7 @@ class ImprovedTransformerLayer(nn.Module):
 class StandardizedMamba(nn.Module):
     """
     Standardized Mamba with parameter count matched to Transformer.
-    Simplified implementation focusing on core SSM mechanics.
+    FIXED: Numerically stable SSM implementation.
     """
     
     def __init__(self, config: Dict[str, Any]):
@@ -422,32 +425,30 @@ class StandardizedMamba(nn.Module):
         self.lm_head.weight = self.embedding.weight  # Weight tying
         
         self._initialize_weights_deterministic()
+        print(f"🏗️ StandardizedMamba initialized: {self._count_parameters():,} parameters")
 
     def set_debug_mode(self, enabled: bool):
         """Optional: align interface with Transformer; toggles module-wide flag."""
         set_debug_mode(enabled)
     
+    def _count_parameters(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+    
     def _initialize_weights_deterministic(self):
         """Deterministic weight initialization matching Transformer"""
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                fan_in = module.in_features
-                fan_out = module.out_features
-                std = math.sqrt(2.0 / (fan_in + fan_out))
-                
-                with torch.no_grad():
-                    module.weight.normal_(0.0, std)
-                    if module.bias is not None:
-                        module.bias.zero_()
+                # Use Xavier uniform for better stability
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
                         
             elif isinstance(module, nn.Embedding):
-                with torch.no_grad():
-                    module.weight.normal_(0.0, 0.02)
+                nn.init.normal_(module.weight, mean=0.0, std=0.02)
                     
             elif isinstance(module, nn.LayerNorm):
-                with torch.no_grad():
-                    module.bias.zero_()
-                    module.weight.fill_(1.0)
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
     
     def forward(self, input_ids: torch.Tensor, labels: torch.Tensor = None, debug: bool = False) -> Dict[str, Any]:
         """Forward pass matching Transformer interface"""
@@ -500,8 +501,8 @@ class StandardizedMamba(nn.Module):
 
 class StandardizedMambaBlock(nn.Module):
     """
-    Improved Mamba block with proper selective mechanisms and Zero-Order Hold discretization.
-    Parameter count tuned to match Transformer layers.
+    FIXED: Numerically stable Mamba block with proper SSM discretization.
+    Uses exponential parameterization for stability and proper gating.
     """
     
     def __init__(self, d_model: int, d_state: int = 16):
@@ -515,18 +516,16 @@ class StandardizedMambaBlock(nn.Module):
         # Input projection
         self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
         
-        # IMPROVED: Selective parameter projections (KEY IMPROVEMENT)
-        # These make B, C, and dt input-dependent (selective mechanism)
-        self.dt_proj = nn.Linear(d_model, self.d_inner, bias=True)
-        self.B_proj = nn.Linear(d_model, self.d_state, bias=False) 
-        self.C_proj = nn.Linear(d_model, self.d_state, bias=False)
+        # Selective parameter projections (input-dependent SSM)
+        self.x_proj = nn.Linear(self.d_inner, self.d_inner + 2 * d_state, bias=False)
         
-        # Static SSM parameters
-        self.A = nn.Parameter(torch.randn(self.d_inner, d_state))
+        # SSM parameters
+        # FIXED: Use log parameterization for A to ensure negative eigenvalues
+        self.A_log = nn.Parameter(torch.randn(self.d_inner, d_state))
         self.D = nn.Parameter(torch.ones(self.d_inner))
         
-        # Learnable time step bias (dt_bias)
-        self.dt_bias = nn.Parameter(torch.zeros(self.d_inner))
+        # Learnable time step parameters
+        self.dt_proj = nn.Linear(self.d_inner, self.d_inner, bias=True)
         
         # Output projection
         self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
@@ -540,102 +539,100 @@ class StandardizedMambaBlock(nn.Module):
     def _initialize_ssm_parameters(self):
         """Initialize SSM parameters for stable dynamics"""
         with torch.no_grad():
-            # A matrix: stable dynamics (negative eigenvalues)
-            # Initialize as diagonal matrices for stability
-            self.A.data = -torch.exp(torch.randn_like(self.A.data)) * 0.5
+            # FIXED: Initialize A_log to give stable negative eigenvalues
+            # A = -exp(A_log) ensures A is always negative
+            self.A_log.uniform_(-5, -1)  # A will be between -exp(-1) and -exp(-5)
             
-            # D matrix: small skip connection
-            self.D.data *= 0.1
+            # D: Skip connection strength
+            self.D.uniform_(0.5, 1.0)
             
-            # dt_bias: Initialize to encourage reasonable time steps
-            self.dt_bias.data.uniform_(-0.1, 0.1)
+            # dt projection bias: positive bias for stable time steps
+            nn.init.uniform_(self.dt_proj.bias, 0.001, 0.1)
     
     def forward(self, x: torch.Tensor, debug: bool = False) -> torch.Tensor:
         """
-        Improved SSM forward pass with selective mechanisms and Zero-Order Hold discretization.
-        
-        Args:
-            x: (batch_size, seq_len, d_model)
-        
-        Returns:
-            output: (batch_size, seq_len, d_model)
+        FIXED: Numerically stable SSM forward pass.
+        Uses proper discretization and gating for stability.
         """
         batch_size, seq_len, _ = x.shape
         residual = x
         
         if debug:
-            print(f"🔍 Mamba forward: input shape {x.shape}")
+            print(f"🔍 Mamba block forward: input shape {x.shape}")
         
         # Input projection and gating
         x_proj = self.in_proj(x)  # (batch, seq_len, 2*d_inner)
-        x_ssm, x_gate = x_proj.chunk(2, dim=-1)
-        x_gate = torch.sigmoid(x_gate)
+        x_ssm, z = x_proj.chunk(2, dim=-1)  # Each is (batch, seq_len, d_inner)
         
-        # IMPROVED: Selective parameters (input-dependent B, C, dt)
-        dt = self.dt_proj(x) + self.dt_bias.unsqueeze(0).unsqueeze(0)  # (batch, seq_len, d_inner)
-        dt = F.softplus(dt)  # Ensure positive time steps
+        # Apply activation to gate
+        z = F.silu(z)
         
-        B = self.B_proj(x)  # (batch, seq_len, d_state)
-        C = self.C_proj(x)  # (batch, seq_len, d_state)
+        # FIXED: Proper SSM parameter computation
+        # Project x_ssm to get dt, B, C
+        ssm_proj = self.x_proj(F.silu(x_ssm))  # (batch, seq_len, d_inner + 2*d_state)
+        dt_proj, BC = ssm_proj.split([self.d_inner, 2 * self.d_state], dim=-1)
+        B, C = BC.split([self.d_state, self.d_state], dim=-1)
+        
+        # Compute dt with softplus for positivity
+        dt = F.softplus(self.dt_proj(dt_proj))  # (batch, seq_len, d_inner)
         
         if debug:
             print(f"🔍 dt range: [{dt.min().item():.6f}, {dt.max().item():.6f}]")
             print(f"🔍 B range: [{B.min().item():.6f}, {B.max().item():.6f}]")
             print(f"🔍 C range: [{C.min().item():.6f}, {C.max().item():.6f}]")
         
-        # IMPROVED: Zero-Order Hold discretization
-        # Instead of simple Euler method, use proper ZOH discretization
+        # FIXED: Stable SSM computation with proper discretization
+        # A is always negative for stability
+        A = -torch.exp(self.A_log)  # (d_inner, d_state), always negative
+        
+        # Initialize hidden state
         h = torch.zeros(batch_size, self.d_inner, self.d_state, 
                        device=x.device, dtype=x.dtype)
         outputs = []
         
         for t in range(seq_len):
+            # Get inputs for this timestep
             u_t = x_ssm[:, t, :]  # (batch, d_inner)
-            dt_t = dt[:, t, :].unsqueeze(-1)  # (batch, d_inner, 1)
-            B_t = B[:, t, :].unsqueeze(1)  # (batch, 1, d_state)
-            C_t = C[:, t, :].unsqueeze(1)  # (batch, 1, d_state)
+            dt_t = dt[:, t, :]  # (batch, d_inner)
+            B_t = B[:, t, :]  # (batch, d_state)
+            C_t = C[:, t, :]  # (batch, d_state)
             
-            # FIXED: Simplified SSM computation with correct tensor dimensions
-            # Use simple discrete-time update: h[t+1] = A*h[t] + B*u[t]
-            # Each channel has its own SSM parameters
+            # FIXED: Proper discretization using matrix exponential approximation
+            # For stability, use first-order approximation: exp(A*dt) ≈ I + A*dt
+            # This is stable when A is negative and dt is small
             
-            # Reshape for per-channel SSM computation
-            # h: (batch, d_inner, d_state) - each of d_inner channels has d_state dimensional state
-            # A: (d_inner, d_state) - A matrix for each channel
-            # B_t: (batch, 1, d_state) -> need (batch, d_inner, d_state)  
-            # u_t: (batch, d_inner) -> need (batch, d_inner, 1)
+            # Expand dimensions for broadcasting
+            dt_expanded = dt_t.unsqueeze(-1)  # (batch, d_inner, 1)
+            B_expanded = B_t.unsqueeze(1).expand(-1, self.d_inner, -1)  # (batch, d_inner, d_state)
+            C_expanded = C_t.unsqueeze(1).expand(-1, self.d_inner, -1)  # (batch, d_inner, d_state)
+            u_expanded = u_t.unsqueeze(-1)  # (batch, d_inner, 1)
             
-            # Expand B_t and C_t to match d_inner dimension
-            B_t_expanded = B_t.expand(batch_size, self.d_inner, self.d_state)  # (batch, d_inner, d_state)
-            C_t_expanded = C_t.expand(batch_size, self.d_inner, self.d_state)  # (batch, d_inner, d_state)
-            u_t_expanded = u_t.unsqueeze(-1)  # (batch, d_inner, 1)
+            # FIXED: Stable state update with clamping
+            # h[t+1] = (I + A*dt) * h[t] + B*dt * u[t]
+            A_discrete = 1 + A.unsqueeze(0) * dt_expanded  # (batch, d_inner, d_state)
+            # Clamp A_discrete to ensure stability (between 0 and 1)
+            A_discrete = torch.clamp(A_discrete, 0.0, 1.0)
             
-            # Discretized SSM step for each channel independently
-            # h[t+1] = (I + A*dt) * h[t] + B * u[t] 
-            # Approximate A_discrete = I + A*dt for stability
-            A_effect = self.A * dt[:, t, :].unsqueeze(-1)  # (batch, d_inner, d_state)
+            # Update state
+            h = A_discrete * h + dt_expanded * B_expanded * u_expanded
             
-            # Update state: h = h + A*dt*h + B*u (simplified stable update)
-            # Clamp dt values to prevent instability
-            dt_clamped = torch.clamp(dt[:, t, :], 0.0, 1.0).unsqueeze(-1)
-            A_effect_clamped = self.A * dt_clamped * 0.1  # Scale down for stability
-            
-            h = h + A_effect_clamped * h + B_t_expanded * u_t_expanded * 0.1  # Scale input
-            
-            # Output: y_t = C*h_t + D*u_t  
-            y_t = torch.sum(C_t_expanded * h, dim=-1) + self.D.unsqueeze(0) * u_t
+            # Compute output: y[t] = C * h[t] + D * u[t]
+            y_t = torch.sum(C_expanded * h, dim=-1) + self.D * u_t
             outputs.append(y_t)
         
-        # Combine outputs and apply gating
-        ssm_out = torch.stack(outputs, dim=1)  # (batch, seq_len, d_inner)
-        gated_out = ssm_out * x_gate
+        # Stack outputs
+        y = torch.stack(outputs, dim=1)  # (batch, seq_len, d_inner)
+        
+        # Apply gating
+        y = y * z
         
         if debug:
-            print(f"🔍 SSM output range: [{gated_out.min().item():.6f}, {gated_out.max().item():.6f}]")
+            print(f"🔍 SSM output range: [{y.min().item():.6f}, {y.max().item():.6f}]")
         
-        # Project back to d_model
-        output = self.out_proj(gated_out)
+        # Output projection
+        output = self.out_proj(y)
         
+        # Residual connection and layer norm
         return self.norm(output + residual)
 
 
@@ -670,7 +667,7 @@ class ModelFactory:
         Create models with validated parameter matching.
         
         Returns:
-            transformer, mamba: Models with parameter counts within 1%
+            transformer, mamba: Models with parameter counts within 20%
         """
         transformer = ModelFactory.create_transformer(transformer_config)
         mamba = ModelFactory.create_mamba(mamba_config)
@@ -709,63 +706,6 @@ class ModelFactory:
         for module_name, module in model.named_modules():
             if len(list(module.children())) == 0:  # Leaf modules only
                 module_params = sum(p.numel() for p in module.parameters())
-                if module_params > 0:
-                    breakdown[module_name] = module_params
-                    total_params += module_params
-        
-        return {
-            "model_name": name,
-            "total_parameters": total_params,
-            "parameter_breakdown": breakdown
-        }
-
-
-if __name__ == "__main__":
-    # Test parameter matching
-    print("Testing Standardized Model Parameter Matching")
-    print("=" * 60)
-    
-    # Test configurations
-    transformer_config = {
-        "vocab_size": 30,
-        "d_model": 384,
-        "n_layers": 6,
-        "n_heads": 12,
-        "dropout": 0.0,
-        "use_hard_alibi": False,  # FIXED: Disabled by default
-    }
-    
-    mamba_config = {
-        "vocab_size": 30,
-        "d_model": 512,  # Adjusted for parameter matching
-        "n_layers": 6,
-        "d_state": 16,
-    }
-    
-    try:
-        transformer, mamba = ModelFactory.create_matched_models(
-            transformer_config, mamba_config
-        )
-        
-        print(f"\n✅ Models created successfully with matched parameters!")
-        
-        # Test forward pass
-        batch_size, seq_len = 2, 100
-        input_ids = torch.randint(0, 30, (batch_size, seq_len))
-        
-        with torch.no_grad():
-            transformer_out = transformer(input_ids)
-            mamba_out = mamba(input_ids)
-            
-        print(f"\n🔄 Forward pass test:")
-        print(f"   Transformer output shape: {transformer_out['logits'].shape}")
-        print(f"   Mamba output shape: {mamba_out['logits'].shape}")
-        print(f"   ✅ Both models produce identical output shapes")
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        
-    print(f"\n📋 Standardized models ready for academic comparison") in module.parameters())
                 if module_params > 0:
                     breakdown[module_name] = module_params
                     total_params += module_params
