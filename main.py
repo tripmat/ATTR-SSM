@@ -57,7 +57,8 @@ def train_models(config, task, debug=False, extreme_verbosity=False):
         "loss_log_interval": 5,  # Log training loss every 5 steps
         # Measure accuracy every 1000 steps
         "validation_interval": 1000,
-        "validation_lengths": [50, 100, 150, 200, 250, 300, 350, 400, 450, 500, 600, 700, 800, 900, 1000],  # Training lengths + extrapolation test
+        # Validation across a mix of seen and unseen lengths (with overlap)
+        "validation_lengths": [10, 20, 40, 50, 80, 100, 150, 160, 200, 300, 400, 500],
         "validation_samples": 5,  # 5 samples per length for efficiency during training
         
         # Intelligent early stopping parameters
